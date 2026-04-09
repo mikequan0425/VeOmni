@@ -31,7 +31,6 @@ dependencies = [
   # "transformers==4.57.3",
   "psutil",
   "timm",
-  "wandb",
   "setuptools",
   "einops>=0.8.1",
 ]
@@ -291,7 +290,7 @@ select = ["B", "C", "E", "F", "I", "W"]
 [tool.ruff.lint.isort]
 lines-after-imports = 2
 known-first-party = ["veomni"]
-known-third-party = ["torch", "transformers", "wandb"]
+known-third-party = ["torch", "transformers"]
 
 [tool.ruff.format]
 quote-style = "double"
