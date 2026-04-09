@@ -20,7 +20,7 @@ if is_transformers_version_greater_or_equal_to("5.2.0"):
 
     @MODELING_REGISTRY.register("qwen3_5")
     def register_qwen3_5_modeling(architecture: str):
-        from .generated.patched_modeling_qwen3_5_gpu import Qwen3_5ForConditionalGeneration, Qwen3_5Model
+        from .generated.patched_modeling_qwen3_5_npu import Qwen3_5ForConditionalGeneration, Qwen3_5Model
 
         if "ForConditionalGeneration" in architecture:
             return Qwen3_5ForConditionalGeneration
