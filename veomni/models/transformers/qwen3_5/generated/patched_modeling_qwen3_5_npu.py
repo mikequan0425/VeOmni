@@ -1362,8 +1362,10 @@ class Qwen3_5VisionModel(Qwen3_5PreTrainedModel):
         outputs = []
         dtype = self.pos_embed.weight.dtype
         for t, h, w in grid_thw:
-            h_idxs = torch.linspace(0, num_grid_per_side - 1, h, device=self.device, dtype=torch.float64)
-            w_idxs = torch.linspace(0, num_grid_per_side - 1, w, device=self.device, dtype=torch.float64)
+            # h_idxs = torch.linspace(0, num_grid_per_side - 1, h, device=self.device, dtype=torch.float64)
+            h_idxs = torch.linspace(0, num_grid_per_side - 1, h, dtype=torch.float64).to(self.device)
+            # w_idxs = torch.linspace(0, num_grid_per_side - 1, w, device=self.device, dtype=torch.float64)
+            w_idxs = torch.linspace(0, num_grid_per_side - 1, w, dtype=torch.float64).to(self.device)
 
             h_floor = h_idxs.to(torch.long)
             w_floor = w_idxs.to(torch.long)
