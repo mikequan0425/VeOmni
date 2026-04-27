@@ -93,8 +93,8 @@ def prepare_wy_repr_bwd_kernel(
                     b_k = tl.load(p_k, boundary_check=(0, 1))
                     b_k_beta_g = (b_k * b_beta[:, None] * b_g_exp[:, None]).to(b_k.dtype)
                     b_dw = tl.load(p_dw, boundary_check=(0, 1))
-                    b_dA += tl.dot(b_dw.to(b_k_beta_g.dtype), tl.trans(b_k_beta_g))
-                    b_dk_beta_g = tl.dot(b_A.to(b_dw.dtype), b_dw)
+                    b_dA += tl.dot(b_dw, tl.trans(b_k_beta_g))
+                    b_dk_beta_g = tl.dot(b_A, b_dw)
                     b_dk = b_dk_beta_g * b_beta[:, None] * b_g_exp[:, None]
                     b_dbeta += tl.sum(b_dk_beta_g * b_k * b_g_exp[:, None], 1)
                     b_dg += tl.sum(b_dk_beta_g * b_k * b_g_exp[:, None] * b_beta[:, None], 1)
@@ -107,8 +107,8 @@ def prepare_wy_repr_bwd_kernel(
                     b_v = tl.load(p_v, boundary_check=(0, 1))
                     b_v_beta = (b_v * b_beta[:, None]).to(b_v.dtype)
                     b_du = tl.load(p_du, boundary_check=(0, 1))
-                    b_dA += tl.dot(b_du.to(b_v_beta.dtype), tl.trans(b_v_beta))
-                    b_dv_beta = tl.dot(b_A.to(b_du.dtype), b_du)
+                    b_dA += tl.dot(b_du, tl.trans(b_v_beta))
+                    b_dv_beta = tl.dot(b_A, b_du)
                     b_dv = b_dv_beta * b_beta[:, None]
                     b_dbeta += tl.sum(b_dv_beta * b_v, 1)
                     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
@@ -211,7 +211,7 @@ def recompute_w_u_fwd_kernel(
                     p_u = tl.make_block_ptr(u + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
                     b_v = tl.load(p_v, boundary_check=(0, 1))
                     b_vb = (b_v * b_beta[:, None]).to(b_v.dtype)
-                    b_u = tl.dot(b_A.to(b_vb.dtype), b_vb, allow_tf32=False)
+                    b_u = tl.dot(b_A, b_vb, allow_tf32=False)
                     tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
 
                 if USE_G:

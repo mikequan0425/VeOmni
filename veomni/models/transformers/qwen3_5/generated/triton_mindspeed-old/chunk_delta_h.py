@@ -756,7 +756,7 @@ def chunk_gated_delta_rule_bwd_dhu(
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
     dv2 = torch.empty_like(dv)
 
-    BV = 64
+    BV = 128
 
     g = g.permute(0, 2, 1).contiguous()
 

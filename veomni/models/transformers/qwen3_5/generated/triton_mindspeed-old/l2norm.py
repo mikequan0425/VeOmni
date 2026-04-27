@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 
 from .utils import input_guard, is_amd
+
 BT_LIST = [8, 16, 32, 64, 128]
 NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
 

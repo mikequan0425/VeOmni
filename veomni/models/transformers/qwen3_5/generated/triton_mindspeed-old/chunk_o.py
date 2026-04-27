@@ -117,7 +117,7 @@ def chunk_bwd_kernel_dqkwg(
                 if USE_G:
                     b_dg_last += (tl.sum(b_h * b_dh))
 
-                b_ds += tl.dot(b_do.to(b_v.dtype), tl.trans(b_v))
+                b_ds += tl.dot(b_do, tl.trans(b_v))
                 b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
                 b_dk += tl.dot(b_v, b_dh.to(b_v.dtype))
 
@@ -166,7 +166,7 @@ def chunk_bwd_kernel_dqkwg(
                 gdiff_ = tl.load(p_gdiff)
                 b_ds = b_ds * gdiff_ * scale
                     
-                b_ds2 = b_ds * tl.dot(b_q, tl.trans(b_k).to(b_q.dtype))
+                b_ds2 = b_ds * tl.dot(b_q, tl.trans(b_k))
                 b_dg += tl.sum(b_ds2, axis=1)
                 b_dg -= tl.sum(b_ds2, axis=0)
 
@@ -253,7 +253,7 @@ def chunk_bwd_kernel_dv_local(
             p_q = tl.make_block_ptr(q + offset_kh, (K, T), (1, H * K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_A += tl.dot(b_k, b_q.to(b_k.dtype))
+            b_A += tl.dot(b_k, b_q)
 
         if USE_G:
             if IS_VARLEN:
@@ -371,9 +371,9 @@ def chunk_fwd_kernel_o(
                         b_h = tl.load(p_h, boundary_check=(0, 1))
 
                         # [BT, BK] @ [BK, BV] -> [BT, BV]
-                        b_o += tl.dot(b_q, b_h.to(b_q.dtype))
+                        b_o += tl.dot(b_q, b_h)
                         # [BT, BK] @ [BK, BT] -> [BT, BT]
-                        b_A += tl.dot(b_q, b_k.to(b_q.dtype))
+                        b_A += tl.dot(b_q, b_k)
 
                     if USE_G:
                         if IS_VARLEN:
