@@ -117,7 +117,7 @@ dmypy.json
 .ruff_cache/
 
 # wandb
-wandb/
+# wandb/
 
 # ckpt
 config.json

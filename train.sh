@@ -6,7 +6,6 @@ set -o pipefail
 export TOKENIZERS_PARALLELISM=false
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 
-NNODES=${NNODES:=1}
 if command -v nvidia-smi &> /dev/null && nvidia-smi --list-gpus &> /dev/null; then
   # GPU
   if [[ -n "${CUDA_VISIBLE_DEVICES}" ]]; then
@@ -24,11 +23,21 @@ else
   fi
   # NPU env that may optimize performance
   export PYTORCH_NPU_ALLOC_CONF=${PYTORCH_NPU_ALLOC_CONF:='expandable_segments:True'}
-  export MULTI_STREAM_MEMORY_REUSE=${MULTI_STREAM_MEMORY_REUSE:=2}
 fi
-NODE_RANK=${NODE_RANK:=0}
-MASTER_ADDR=${MASTER_ADDR:=0.0.0.0}
-MASTER_PORT=${MASTER_PORT:=12345}
+# NODE_RANK=${NODE_RANK:=0}
+# MASTER_ADDR=${MASTER_ADDR:=0.0.0.0}
+# MASTER_PORT=${MASTER_PORT:=12345}
+
+
+NNODES=${NNODES:=$ARNOLD_WORKER_NUM}
+NPROC_PER_NODE=${NPROC_PER_NODE:=$ARNOLD_WORKER_GPU}
+NPROC_PER_NODE=${NPROC_PER_NODE:=$ARNOLD_WORKER_GPU_PER_NODE}
+NODE_RANK=${NODE_RANK:=$ARNOLD_ID}
+MASTER_ADDR=${MASTER_ADDR:=$ARNOLD_WORKER_0_HOST}
+MASTER_ADDR=${MASTER_ADDR:=$ARNOLD_EXECUTOR_0_HOST}
+MASTER_PORT=${MASTER_PORT:=$(echo "$ARNOLD_WORKER_0_PORT" | cut -d "," -f 1)}
+MASTER_PORT=${MASTER_PORT:=$(echo "$ARNOLD_EXECUTOR_0_PORT" | cut -d "," -f 1)}
+
 
 if [[ "$NNODES" == "1" ]]; then
   additional_args="$additional_args --standalone"

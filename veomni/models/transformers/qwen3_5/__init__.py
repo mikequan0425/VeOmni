@@ -25,7 +25,8 @@ if is_transformers_version_greater_or_equal_to("5.2.0"):
             from .generated.patched_modeling_qwen3_5_gpu import Qwen3_5ForConditionalGeneration, Qwen3_5Model
         elif IS_NPU_AVAILABLE:
             from .generated.patched_modeling_qwen3_5_npu import Qwen3_5ForConditionalGeneration, Qwen3_5Model
-
+            from .npu_patch import apply_qwen3_5_patch
+            apply_qwen3_5_patch()
         if "ForConditionalGeneration" in architecture:
             return Qwen3_5ForConditionalGeneration
         elif "Model" in architecture:

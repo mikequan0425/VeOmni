@@ -84,11 +84,10 @@ from transformers.utils.output_capturing import capture_outputs
 
 from veomni.distributed.parallel_state import get_parallel_state
 from veomni.distributed.sequence_parallel import sp_pad_and_slice
+from veomni.distributed.sequence_parallel.data import gather_outputs, slice_input_tensor
 from veomni.distributed.sequence_parallel.ulysses import (
     gather_heads_scatter_seq,
-    gather_outputs,
     gather_seq_scatter_heads,
-    slice_input_tensor,
 )
 from veomni.utils.constants import IMAGE_INPUT_INDEX, VIDEO_INPUT_INDEX
 from veomni.utils.device import get_device_id
@@ -109,6 +108,7 @@ causal_conv1d_update = None
 chunk_gated_delta_rule = None
 fused_recurrent_gated_delta_rule = None
 
+from .chunk_gated_delta_rule_mm import chunk_gated_delta_rule
 # ── OpSlot declarations ──────────────────────────────────────────────────
 # Bound at model-build time by _bind_veomni_ops() in auto.py.
 from veomni.ops.dispatch import OpSlot
@@ -116,8 +116,9 @@ from veomni.ops.dispatch import OpSlot
 
 veomni_causal_lm_loss = OpSlot("cross_entropy_loss", "causal")
 veomni_rms_norm_gated = OpSlot("rms_norm_gated", "standard")
-veomni_causal_conv1d = OpSlot("causal_conv1d", "standard")
-veomni_chunk_gated_delta_rule = OpSlot("chunk_gated_delta_rule", "standard")
+from veomni.models.transformers.qwen3_5.generated.causal_conv1d import causal_conv1d as causal_conv1d_fn_triton
+veomni_causal_conv1d = causal_conv1d_fn_triton
+veomni_chunk_gated_delta_rule = chunk_gated_delta_rule
 
 
 def get_position_id(main_func, self, **kwargs):
@@ -575,9 +576,13 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         # falls back to the torch chunk_gated_delta_rule, which `forward` rejects
         # for varlen training; the decode-only `*_update` aliases are kept None
         # because the precomputed-state path raises NotImplementedError anyway.
-        self.causal_conv1d_fn = veomni_causal_conv1d.bound_kernel()
+        # self.causal_conv1d_fn = veomni_causal_conv1d.bound_kernel()
+        # self.causal_conv1d_update = causal_conv1d_update or torch_causal_conv1d_update
+        # self.chunk_gated_delta_rule = veomni_chunk_gated_delta_rule.bound_kernel() or torch_chunk_gated_delta_rule
+        # self.recurrent_gated_delta_rule = fused_recurrent_gated_delta_rule or torch_recurrent_gated_delta_rule
+        self.causal_conv1d_fn = veomni_causal_conv1d
         self.causal_conv1d_update = causal_conv1d_update or torch_causal_conv1d_update
-        self.chunk_gated_delta_rule = veomni_chunk_gated_delta_rule.bound_kernel() or torch_chunk_gated_delta_rule
+        self.chunk_gated_delta_rule = veomni_chunk_gated_delta_rule
         self.recurrent_gated_delta_rule = fused_recurrent_gated_delta_rule or torch_recurrent_gated_delta_rule
 
         if not is_fast_path_available:
@@ -602,6 +607,8 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         cu_seq_lens_q: torch.Tensor | None = None,
     ):
         hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
+        from veomni.models.transformers.qwen3_5.generated.triton.utils import to_npu
+        cu_seq_lens_q_npu = to_npu(cu_seq_lens_q)
 
         # Set up dimensions for reshapes later
         batch_size, seq_len, _ = hidden_states.shape
@@ -688,14 +695,16 @@ class Qwen3_5GatedDeltaNet(nn.Module):
                 else:
                     conv_weight = self.conv1d.weight.squeeze(1)
                 # mixed_qkv is [B, S, D] — FLA causal_conv1d expects [B, S, D].
+                conv_weight = conv_weight.transpose(0, 1)
                 mixed_qkv = self.causal_conv1d_fn(
-                    x=mixed_qkv,
-                    weight=conv_weight,
-                    bias=self.conv1d.bias,
-                    activation=self.activation,
-                    seq_idx=None,
-                    backend="triton",
-                    cu_seqlens=cu_seq_lens_q.npu(),
+                    mixed_qkv,
+                    conv_weight,
+                    self.conv1d.bias,
+                    None,
+                    None,
+                    self.activation,
+                    cu_seq_lens_q_npu,
+                    False,
                 )[0]
             else:
                 raise NotImplementedError("This path is not supported yet because it can't process varlen now.")
@@ -748,7 +757,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
                     initial_state=None,
                     output_final_state=cache_params is not None,
                     use_qk_l2norm_in_kernel=True,
-                    cu_seqlens=cu_seq_lens_q.npu(),
+                    cu_seqlens=cu_seq_lens_q_npu,
                 )
         else:
             core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
