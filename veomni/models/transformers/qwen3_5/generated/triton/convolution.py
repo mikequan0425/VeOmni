@@ -13,6 +13,19 @@ import triton
 import triton.language as tl
 from typing import Any, Callable, Dict, Optional, Tuple
 
+try:
+    # 导入昇腾CANN适配triton扩展里的两个切片算子
+    from triton.language.extra.cann.extension import extract_slice, insert_slice
+
+    # 把导入的函数挂载到triton语言顶层模块tl上，全局可用
+    if not hasattr(tl, "extract_slice"):
+        tl.extract_slice = extract_slice
+    if not hasattr(tl, "insert_slice"):
+        tl.insert_slice = insert_slice
+# 万一环境没有这个cann扩展包，导入失败直接跳过，不打断程序运行
+except ImportError:
+    pass
+
 def tensor_cache(
     fn: Optional[Callable[..., torch.Tensor]] = None,
     *,
