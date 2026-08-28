@@ -288,6 +288,25 @@ def test_qwen3_5_mtp_loss_flattens_depth_and_uses_all_valid_targets():
     assert calls[0]["custom_normalization_kwarg"] == "preserved"
 
 
+def test_qwen3_5_mtp_loss_and_num_tokens_returns_raw_statistics():
+    def loss_fn(**kwargs):
+        return kwargs["hidden_states"].sum() * 0 + 2.5, None, None
+
+    hidden_states = (torch.zeros(1, 4, 3), torch.ones(1, 4, 3))
+    mtp_labels = torch.tensor([[[2, 3, -100, -100], [3, -100, -100, -100]]])
+
+    loss, num_tokens = dense_modeling.compute_mtp_loss_and_num_tokens(
+        loss_fn,
+        hidden_states,
+        mtp_labels,
+        torch.zeros(7, 3),
+        vocab_size=7,
+    )
+
+    assert loss.item() == 2.5
+    assert torch.equal(num_tokens, torch.tensor(3))
+
+
 def test_qwen3_5_mtp_loss_is_differentiable_zero_without_valid_targets():
     calls = []
 
@@ -313,6 +332,75 @@ def test_qwen3_5_mtp_loss_is_differentiable_zero_without_valid_targets():
     assert torch.count_nonzero(hidden_state.grad).item() == 0
 
 
+def test_qwen3_5_mtp_labels_trigger_mtp_without_foundation_labels(monkeypatch):
+    class _ModelOutput:
+        past_key_values = None
+        hidden_states = None
+        attentions = None
+        rope_deltas = None
+        mtp_context = {
+            "inputs_embeds": torch.zeros(1, 4, 8),
+            "position_embeddings": (torch.empty(0), torch.empty(0)),
+            "attention_mask": torch.ones(1, 1, 4, 4),
+            "position_ids": torch.arange(4).unsqueeze(0),
+        }
+
+        def __getitem__(self, index):
+            assert index == 0
+            return torch.zeros(1, 4, 8)
+
+    class _Model:
+        def __call__(self, **kwargs):
+            return _ModelOutput()
+
+    class _LMHead:
+        weight = torch.zeros(7, 8)
+
+        def __call__(self, hidden_states):
+            return torch.zeros(*hidden_states.shape[:-1], 7)
+
+    class _MTP:
+        def __call__(self, **kwargs):
+            return (torch.zeros(1, 4, 8),)
+
+    def loss_function(**kwargs):
+        return torch.tensor(2.5), None, None
+
+    dense_modeling.veomni_causal_lm_loss.bind("eager")
+    self = SimpleNamespace(
+        model=_Model(),
+        mtp=_MTP(),
+        lm_head=_LMHead(),
+        loss_function=loss_function,
+        config=SimpleNamespace(
+            return_dict=True,
+            text_config=SimpleNamespace(
+                vocab_size=7,
+                mtp_loss_weight=0.3,
+                mtp_num_hidden_layers=1,
+            ),
+        ),
+    )
+    mtp_labels = torch.tensor([[[2, 3, -100, -100]]])
+
+    output = dense_modeling.Qwen3_5ForConditionalGeneration.forward(self, mtp_labels=mtp_labels)
+
+    assert output.loss is None
+    assert output.loss_dict == {
+        "foundation_loss": None,
+        "mtp_loss": torch.tensor(2.5) * 0.3,
+    }
+    assert output.mtp_aux_loss.item() == 2.5
+    assert torch.equal(output.mtp_num_tokens, torch.tensor(2))
+
+
+def test_qwen3_5_mtp_labels_reject_missing_mtp_head():
+    self = SimpleNamespace(mtp=None)
+
+    with pytest.raises(ValueError, match="no MTP head"):
+        dense_modeling.Qwen3_5ForConditionalGeneration.forward(self, mtp_labels=torch.zeros(1, 1, 2))
+
+
 def test_qwen3_5_moe_mtp_outputs_keep_auxiliary_fields():
     context = {"position_ids": torch.arange(4)}
     router_logits = (torch.zeros(4, 2),)
@@ -322,11 +410,21 @@ def test_qwen3_5_moe_mtp_outputs_keep_auxiliary_fields():
         mtp_context=context,
     )
     loss_dict = {"foundation_loss": torch.tensor(1.0), "mtp_loss": torch.tensor(0.5)}
-    causal_output = modeling.Qwen3_5MoeCausalLMOutputWithLogProbs(loss_dict=loss_dict)
+    causal_output = modeling.Qwen3_5MoeCausalLMOutputWithLogProbs(
+        loss_dict=loss_dict,
+        aux_loss=torch.tensor(0.25),
+        mtp_aux_loss=torch.tensor(0.5),
+        mtp_num_tokens=torch.tensor(3),
+        moe_num_tokens=torch.tensor(7),
+    )
 
     assert model_output.mtp_context is context
     assert model_output.router_logits is router_logits
     assert causal_output.loss_dict == loss_dict
+    assert causal_output.aux_loss.item() == 0.25
+    assert causal_output.mtp_aux_loss.item() == 0.5
+    assert causal_output.mtp_num_tokens.item() == 3
+    assert causal_output.moe_num_tokens.item() == 7
 
 
 def test_qwen3_5_moe_parallel_plan_covers_mtp_experts():

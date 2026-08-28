@@ -271,43 +271,15 @@ def _mtp_loss_weight(text_config):
 
 def compute_mtp_loss(mtp_loss_fn, hidden_states, mtp_labels, weights, vocab_size, **kwargs):
     """Compute one token-normalized loss over all MTP depths."""
-    if mtp_labels.ndim != 3:
-        raise ValueError(
-            f"MTP labels must have shape [batch, depth, sequence]; got mtp_labels.shape={tuple(mtp_labels.shape)}."
-        )
-    if len(hidden_states) != mtp_labels.shape[1]:
-        raise ValueError(
-            "MTP hidden-state depth must match the label depth; "
-            f"got {len(hidden_states)} hidden-state row(s) and {mtp_labels.shape[1]} label row(s)."
-        )
-
-    batch_size, num_depths, sequence_length = mtp_labels.shape
-    stacked_hidden_states = torch.stack(hidden_states, dim=1)
-    flat_hidden_states = stacked_hidden_states.reshape(batch_size * num_depths, sequence_length, -1)
-    flat_labels = mtp_labels.reshape(batch_size * num_depths, sequence_length)
-
-    valid_target_count = (flat_labels != IGNORE_INDEX).sum()  # noqa: F821
-    has_valid_target = valid_target_count > 0
-    safe_labels = flat_labels.clone()
-    safe_labels.reshape(-1)[0] = torch.where(
-        has_valid_target,
-        safe_labels.reshape(-1)[0],
-        safe_labels.new_zeros(()),
+    mtp_loss, _ = compute_mtp_loss_and_num_tokens(  # noqa: F821 defined via add_helper
+        mtp_loss_fn,
+        hidden_states,
+        mtp_labels,
+        weights,
+        vocab_size,
+        **kwargs,
     )
-
-    loss_kwargs = dict(kwargs)
-    loss_kwargs.pop("shift_labels", None)
-    loss_kwargs["num_items_in_batch"] = valid_target_count.clamp_min(1)
-    mtp_loss, _, _ = mtp_loss_fn(
-        logits=None,
-        labels=safe_labels,
-        vocab_size=vocab_size,
-        hidden_states=flat_hidden_states,
-        weights=weights,
-        shift_labels=safe_labels,
-        **loss_kwargs,
-    )
-    return mtp_loss * has_valid_target.to(mtp_loss.dtype)
+    return mtp_loss
 
 
 def compute_mtp_router_aux_loss(
@@ -2128,9 +2100,18 @@ class Qwen3_5MoeCausalLMOutputWithLogProbs(FusedLinearAuxOutputMixin, Qwen3_5Moe
         (``log_probs`` / ``entropy``; plus ``distillation_losses`` /
         ``student_mass`` / ``teacher_mass`` on the top-k distillation path).
         ``None`` on the plain loss path; populated when ``return_log_probs=True``.
+    mtp_aux_loss (`torch.FloatTensor`, *optional*):
+        Raw, token-normalized MTP loss before any training-loop scaling.
+    mtp_num_tokens (`torch.LongTensor`, *optional*):
+        Number of valid MTP targets used to normalize ``mtp_aux_loss``.
+    moe_num_tokens (`torch.LongTensor`, *optional*):
+        Number of foundation and MTP router rows used to normalize ``aux_loss``.
     """
 
     loss_dict: dict[str, torch.Tensor] | None = None
+    mtp_aux_loss: torch.FloatTensor | None = None
+    mtp_num_tokens: torch.LongTensor | None = None
+    moe_num_tokens: torch.LongTensor | None = None
 
 
 # ======================================================================
@@ -3152,7 +3133,9 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3_5MoePreTrainedModel, GenerationMi
         output_router_logits = (
             output_router_logits if output_router_logits is not None else self.config.text_config.output_router_logits
         )
-        requires_mtp_context = self.mtp is not None and labels is not None
+        if mtp_labels is not None and self.mtp is None:
+            raise ValueError("Qwen3.5 MoE MTP labels were provided, but the model has no MTP head.")
+        requires_mtp_context = self.mtp is not None and (labels is not None or mtp_labels is not None)
         if requires_mtp_context and mtp_labels is None:
             raise ValueError("Qwen3.5 MoE MTP loss requires `mtp_labels` when `labels` are provided.")
 
@@ -3214,6 +3197,8 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3_5MoePreTrainedModel, GenerationMi
 
         loss_dict = None
         mtp_router_logits = None
+        mtp_loss = None
+        mtp_num_tokens = None
         if requires_mtp_context:
             mtp_context = getattr(outputs, "mtp_context", None)
             if mtp_context is None:
@@ -3231,7 +3216,7 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3_5MoePreTrainedModel, GenerationMi
                 output_router_logits=output_router_logits,
             )
             mtp_loss_fn = veomni_causal_lm_loss if veomni_causal_lm_loss.use_non_eager_impl else self.loss_function
-            mtp_loss = compute_mtp_loss(  # noqa: F821
+            mtp_loss, mtp_num_tokens = compute_mtp_loss_and_num_tokens(  # noqa: F821
                 mtp_loss_fn,
                 mtp_hidden_states,
                 mtp_labels,
@@ -3244,6 +3229,7 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3_5MoePreTrainedModel, GenerationMi
 
         router_logits = outputs.router_logits
         aux_loss = None
+        moe_num_tokens = None
         if output_router_logits:
             router_loss_fn = (
                 veomni_load_balancing_loss
@@ -3267,6 +3253,13 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3_5MoePreTrainedModel, GenerationMi
                     self.config.text_config.num_experts_per_tok,
                     attention_mask,
                 )
+            if attention_mask is not None:
+                foundation_num_tokens = attention_mask.sum()
+            else:
+                foundation_num_tokens = mtp_labels.shape[0] * mtp_labels.shape[2] if mtp_labels is not None else 0
+            moe_num_tokens = foundation_num_tokens
+            if mtp_num_tokens is not None:
+                moe_num_tokens = moe_num_tokens + mtp_num_tokens
             if labels is not None and isinstance(aux_loss, torch.Tensor):
                 loss = loss + self.config.text_config.router_aux_loss_coef * aux_loss.to(loss.device)
                 if loss_dict is not None:
@@ -3276,6 +3269,9 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3_5MoePreTrainedModel, GenerationMi
             loss=loss,
             loss_dict=loss_dict,
             aux_loss=aux_loss,
+            mtp_aux_loss=mtp_loss,
+            mtp_num_tokens=mtp_num_tokens,
+            moe_num_tokens=moe_num_tokens,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,

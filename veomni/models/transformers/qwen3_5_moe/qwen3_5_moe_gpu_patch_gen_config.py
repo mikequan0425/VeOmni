@@ -56,6 +56,7 @@ from transformers.utils import TransformersKwargs, logging
 from veomni.distributed.parallel_state import get_parallel_state
 from veomni.models.transformers.qwen3_5.qwen3_5_gpu_patch_gen_config import (
     _mtp_loss_weight,
+    compute_mtp_loss_and_num_tokens,
     compute_mtp_loss,
     make_mtp_labels,
     qwen3_5_gated_deltanet_forward_patched,
@@ -110,6 +111,7 @@ config.add_import(
 )
 config.add_import("veomni.utils.moe_router_replay", names=["get_active_replay", "maybe_replay_indices"])
 config.add_helper(_mtp_loss_weight)
+config.add_helper(compute_mtp_loss_and_num_tokens)
 config.add_helper(compute_mtp_loss)
 config.add_helper(make_mtp_labels)
 config.drop_import_names(
@@ -578,9 +580,18 @@ class Qwen3_5MoeCausalLMOutputWithLogProbs(FusedLinearAuxOutputMixin, Qwen3_5Moe
         (``log_probs`` / ``entropy``; plus ``distillation_losses`` /
         ``student_mass`` / ``teacher_mass`` on the top-k distillation path).
         ``None`` on the plain loss path; populated when ``return_log_probs=True``.
+    mtp_aux_loss (`torch.FloatTensor`, *optional*):
+        Raw, token-normalized MTP loss before any training-loop scaling.
+    mtp_num_tokens (`torch.LongTensor`, *optional*):
+        Number of valid MTP targets used to normalize ``mtp_aux_loss``.
+    moe_num_tokens (`torch.LongTensor`, *optional*):
+        Number of foundation and MTP router rows used to normalize ``aux_loss``.
     """
 
     loss_dict: dict[str, torch.Tensor] | None = None
+    mtp_aux_loss: torch.FloatTensor | None = None
+    mtp_num_tokens: torch.LongTensor | None = None
+    moe_num_tokens: torch.LongTensor | None = None
 
 
 @config.add_helper_after("Qwen3_5MoeModelOutputWithPast")
@@ -1209,7 +1220,9 @@ def qwen3_5_moe_forconditional_generation_forward_patched(
     output_router_logits = (
         output_router_logits if output_router_logits is not None else self.config.text_config.output_router_logits
     )
-    requires_mtp_context = self.mtp is not None and labels is not None
+    if mtp_labels is not None and self.mtp is None:
+        raise ValueError("Qwen3.5 MoE MTP labels were provided, but the model has no MTP head.")
+    requires_mtp_context = self.mtp is not None and (labels is not None or mtp_labels is not None)
     if requires_mtp_context and mtp_labels is None:
         raise ValueError("Qwen3.5 MoE MTP loss requires `mtp_labels` when `labels` are provided.")
 
@@ -1271,6 +1284,8 @@ def qwen3_5_moe_forconditional_generation_forward_patched(
 
     loss_dict = None
     mtp_router_logits = None
+    mtp_loss = None
+    mtp_num_tokens = None
     if requires_mtp_context:
         mtp_context = getattr(outputs, "mtp_context", None)
         if mtp_context is None:
@@ -1288,7 +1303,7 @@ def qwen3_5_moe_forconditional_generation_forward_patched(
             output_router_logits=output_router_logits,
         )
         mtp_loss_fn = veomni_causal_lm_loss if veomni_causal_lm_loss.use_non_eager_impl else self.loss_function
-        mtp_loss = compute_mtp_loss(  # noqa: F821
+        mtp_loss, mtp_num_tokens = compute_mtp_loss_and_num_tokens(  # noqa: F821
             mtp_loss_fn,
             mtp_hidden_states,
             mtp_labels,
@@ -1301,6 +1316,7 @@ def qwen3_5_moe_forconditional_generation_forward_patched(
 
     router_logits = outputs.router_logits
     aux_loss = None
+    moe_num_tokens = None
     if output_router_logits:
         router_loss_fn = (
             veomni_load_balancing_loss if veomni_load_balancing_loss.use_non_eager_impl else load_balancing_loss_func
@@ -1322,6 +1338,13 @@ def qwen3_5_moe_forconditional_generation_forward_patched(
                 self.config.text_config.num_experts_per_tok,
                 attention_mask,
             )
+        if attention_mask is not None:
+            foundation_num_tokens = attention_mask.sum()
+        else:
+            foundation_num_tokens = mtp_labels.shape[0] * mtp_labels.shape[2] if mtp_labels is not None else 0
+        moe_num_tokens = foundation_num_tokens
+        if mtp_num_tokens is not None:
+            moe_num_tokens = moe_num_tokens + mtp_num_tokens
         if labels is not None and isinstance(aux_loss, torch.Tensor):
             loss = loss + self.config.text_config.router_aux_loss_coef * aux_loss.to(loss.device)
             if loss_dict is not None:
@@ -1331,6 +1354,9 @@ def qwen3_5_moe_forconditional_generation_forward_patched(
         loss=loss,
         loss_dict=loss_dict,
         aux_loss=aux_loss,
+        mtp_aux_loss=mtp_loss,
+        mtp_num_tokens=mtp_num_tokens,
+        moe_num_tokens=moe_num_tokens,
         logits=logits,
         past_key_values=outputs.past_key_values,
         hidden_states=outputs.hidden_states,

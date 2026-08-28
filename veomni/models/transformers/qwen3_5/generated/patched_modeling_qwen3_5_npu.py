@@ -263,43 +263,15 @@ def _mtp_loss_weight(text_config):
 
 def compute_mtp_loss(mtp_loss_fn, hidden_states, mtp_labels, weights, vocab_size, **kwargs):
     """Compute one token-normalized loss over all MTP depths."""
-    if mtp_labels.ndim != 3:
-        raise ValueError(
-            f"MTP labels must have shape [batch, depth, sequence]; got mtp_labels.shape={tuple(mtp_labels.shape)}."
-        )
-    if len(hidden_states) != mtp_labels.shape[1]:
-        raise ValueError(
-            "MTP hidden-state depth must match the label depth; "
-            f"got {len(hidden_states)} hidden-state row(s) and {mtp_labels.shape[1]} label row(s)."
-        )
-
-    batch_size, num_depths, sequence_length = mtp_labels.shape
-    stacked_hidden_states = torch.stack(hidden_states, dim=1)
-    flat_hidden_states = stacked_hidden_states.reshape(batch_size * num_depths, sequence_length, -1)
-    flat_labels = mtp_labels.reshape(batch_size * num_depths, sequence_length)
-
-    valid_target_count = (flat_labels != IGNORE_INDEX).sum()  # noqa: F821
-    has_valid_target = valid_target_count > 0
-    safe_labels = flat_labels.clone()
-    safe_labels.reshape(-1)[0] = torch.where(
-        has_valid_target,
-        safe_labels.reshape(-1)[0],
-        safe_labels.new_zeros(()),
+    mtp_loss, _ = compute_mtp_loss_and_num_tokens(  # noqa: F821 defined via add_helper
+        mtp_loss_fn,
+        hidden_states,
+        mtp_labels,
+        weights,
+        vocab_size,
+        **kwargs,
     )
-
-    loss_kwargs = dict(kwargs)
-    loss_kwargs.pop("shift_labels", None)
-    loss_kwargs["num_items_in_batch"] = valid_target_count.clamp_min(1)
-    mtp_loss, _, _ = mtp_loss_fn(
-        logits=None,
-        labels=safe_labels,
-        vocab_size=vocab_size,
-        hidden_states=flat_hidden_states,
-        weights=weights,
-        shift_labels=safe_labels,
-        **loss_kwargs,
-    )
-    return mtp_loss * has_valid_target.to(mtp_loss.dtype)
+    return mtp_loss
 
 
 def make_mtp_labels(feature, num_depths=1):
@@ -2814,7 +2786,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3_5PreTrainedModel, GenerationMixin):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | Qwen3_5CausalLMOutputWithLogProbs:
         """Run conditional generation and combine foundation and weighted MTP losses."""
-        requires_mtp_context = self.mtp is not None and labels is not None
+        if mtp_labels is not None and self.mtp is None:
+            raise ValueError("Qwen3.5 MTP labels were provided, but the model has no MTP head.")
+        requires_mtp_context = self.mtp is not None and (labels is not None or mtp_labels is not None)
         if requires_mtp_context and mtp_labels is None:
             raise ValueError("Qwen3.5 MTP loss requires `mtp_labels` when `labels` are provided.")
 
@@ -2887,7 +2861,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3_5PreTrainedModel, GenerationMixin):
                 max_length_k=kwargs.get("max_length_k"),
             )
             mtp_loss_fn = veomni_causal_lm_loss if veomni_causal_lm_loss.use_non_eager_impl else self.loss_function
-            mtp_loss = compute_mtp_loss(  # noqa: F821 defined via add_helper
+            mtp_loss, mtp_num_tokens = compute_mtp_loss_and_num_tokens(  # noqa: F821 defined via add_helper
                 mtp_loss_fn,
                 mtp_hidden_states,
                 mtp_labels,
@@ -2901,6 +2875,8 @@ class Qwen3_5ForConditionalGeneration(Qwen3_5PreTrainedModel, GenerationMixin):
         return Qwen3_5CausalLMOutputWithLogProbs(
             loss=loss,
             loss_dict=loss_dict,
+            mtp_aux_loss=mtp_loss,
+            mtp_num_tokens=mtp_num_tokens,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,

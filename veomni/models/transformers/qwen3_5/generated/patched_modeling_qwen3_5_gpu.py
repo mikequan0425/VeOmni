@@ -178,8 +178,15 @@ def make_mtp_labels(feature, num_depths=1):
     )
 
 
-def compute_mtp_loss(mtp_loss_fn, hidden_states, mtp_labels, weights, vocab_size, **kwargs):
-    """Compute one token-normalized loss over all MTP depths."""
+def compute_mtp_loss_and_num_tokens(
+    mtp_loss_fn,
+    hidden_states,
+    mtp_labels,
+    weights,
+    vocab_size,
+    **kwargs,
+):
+    """Compute one token-normalized loss over all MTP depths and its token count."""
     if mtp_labels.ndim != 3:
         raise ValueError(
             f"MTP labels must have shape [batch, depth, sequence]; got mtp_labels.shape={tuple(mtp_labels.shape)}."
@@ -216,7 +223,20 @@ def compute_mtp_loss(mtp_loss_fn, hidden_states, mtp_labels, weights, vocab_size
         shift_labels=safe_labels,
         **loss_kwargs,
     )
-    return mtp_loss * has_valid_target.to(mtp_loss.dtype)
+    return mtp_loss * has_valid_target.to(mtp_loss.dtype), valid_target_count
+
+
+def compute_mtp_loss(mtp_loss_fn, hidden_states, mtp_labels, weights, vocab_size, **kwargs):
+    """Compute one token-normalized loss over all MTP depths."""
+    mtp_loss, _ = compute_mtp_loss_and_num_tokens(  # noqa: F821 defined via add_helper
+        mtp_loss_fn,
+        hidden_states,
+        mtp_labels,
+        weights,
+        vocab_size,
+        **kwargs,
+    )
+    return mtp_loss
 
 
 def mm_token_type_ids_from_input_ids(input_ids, config):
@@ -2732,9 +2752,15 @@ class Qwen3_5CausalLMOutputWithLogProbs(FusedLinearAuxOutputMixin, Qwen3_5Causal
         ``None`` on the plain loss path; populated when ``return_log_probs=True``.
     loss_dict (`dict[str, torch.Tensor]`, *optional*):
         Per-head losses used by ``BaseTrainer.postforward``.
+    mtp_aux_loss (`torch.FloatTensor`, *optional*):
+        Raw, token-normalized MTP loss before any training-loop scaling.
+    mtp_num_tokens (`torch.LongTensor`, *optional*):
+        Number of valid MTP targets used to normalize ``mtp_aux_loss``.
     """
 
     loss_dict: dict[str, torch.Tensor] | None = None
+    mtp_aux_loss: torch.FloatTensor | None = None
+    mtp_num_tokens: torch.LongTensor | None = None
 
 
 # ======================================================================
@@ -2820,7 +2846,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3_5PreTrainedModel, GenerationMixin):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | Qwen3_5CausalLMOutputWithLogProbs:
         """Run conditional generation and combine foundation and weighted MTP losses."""
-        requires_mtp_context = self.mtp is not None and labels is not None
+        if mtp_labels is not None and self.mtp is None:
+            raise ValueError("Qwen3.5 MTP labels were provided, but the model has no MTP head.")
+        requires_mtp_context = self.mtp is not None and (labels is not None or mtp_labels is not None)
         if requires_mtp_context and mtp_labels is None:
             raise ValueError("Qwen3.5 MTP loss requires `mtp_labels` when `labels` are provided.")
 
@@ -2893,7 +2921,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3_5PreTrainedModel, GenerationMixin):
                 max_length_k=kwargs.get("max_length_k"),
             )
             mtp_loss_fn = veomni_causal_lm_loss if veomni_causal_lm_loss.use_non_eager_impl else self.loss_function
-            mtp_loss = compute_mtp_loss(  # noqa: F821 defined via add_helper
+            mtp_loss, mtp_num_tokens = compute_mtp_loss_and_num_tokens(  # noqa: F821 defined via add_helper
                 mtp_loss_fn,
                 mtp_hidden_states,
                 mtp_labels,
@@ -2907,6 +2935,8 @@ class Qwen3_5ForConditionalGeneration(Qwen3_5PreTrainedModel, GenerationMixin):
         return Qwen3_5CausalLMOutputWithLogProbs(
             loss=loss,
             loss_dict=loss_dict,
+            mtp_aux_loss=mtp_loss,
+            mtp_num_tokens=mtp_num_tokens,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,

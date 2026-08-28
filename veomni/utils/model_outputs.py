@@ -143,6 +143,17 @@ _FUSED_LINEAR_AUX_ARGS_DOC = """
     """
 
 
+_MTP_MOE_AUX_ARGS_DOC = """
+    Args:
+        mtp_aux_loss (`torch.Tensor`, *optional*):
+            Raw, token-normalized MTP loss before applying any training-loop scale.
+        mtp_num_tokens (`torch.Tensor`, *optional*):
+            Number of valid targets used to normalize ``mtp_aux_loss``.
+        moe_num_tokens (`torch.Tensor`, *optional*):
+            Number of foundation and MTP router rows used to normalize ``aux_loss``.
+    """
+
+
 @dataclass
 class CausalLMOutputWithLogProbs(FusedLinearAuxOutputMixin, CausalLMOutputWithPast):
     __doc__ = "``CausalLMOutputWithPast`` + ``fused_linear_aux`` payload." + _FUSED_LINEAR_AUX_ARGS_DOC
@@ -150,7 +161,13 @@ class CausalLMOutputWithLogProbs(FusedLinearAuxOutputMixin, CausalLMOutputWithPa
 
 @dataclass
 class MoeCausalLMOutputWithLogProbs(FusedLinearAuxOutputMixin, MoeCausalLMOutputWithPast):
-    __doc__ = "``MoeCausalLMOutputWithPast`` + ``fused_linear_aux`` payload." + _FUSED_LINEAR_AUX_ARGS_DOC
+    mtp_aux_loss: Optional[torch.Tensor] = None
+    mtp_num_tokens: Optional[torch.Tensor] = None
+    moe_num_tokens: Optional[torch.Tensor] = None
+    __doc__ = (
+        "``MoeCausalLMOutputWithPast`` + ``fused_linear_aux`` payload and optional "
+        "unscaled MTP / router auxiliary-loss fields."
+    ) + _MTP_MOE_AUX_ARGS_DOC
 
 
 # ──────────────────────────────────────────────────────────────────────────────
